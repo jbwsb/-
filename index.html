@@ -44,14 +44,14 @@ const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
    Two fixed seats (1 and 2). Each seat has its own private inbox topic.
    You listen on your inbox and send to the other seat's inbox,
    so your own messages never come back as notifications. */
-let S = load('hush2-s', null);
-const seen = new Set(load('hush2-seen', []));
-let since = load('hush2-since', 'all');
+let S = load('hush3-s', null);
+const seen = new Set(load('hush3-seen', []));
+let since = load('hush3-since', 'all');
 const shown = new Map();
 let es = null;
 
 async function topicOf(phrase, seat) {
-  const raw = 'hush|' + phrase.trim().toLowerCase() + '|inbox' + seat;
+  const raw = 'hush3|' + phrase.trim().toLowerCase() + '|inbox' + seat;
   const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw));
   return 'hush-' + [...new Uint8Array(b)].slice(0, 16).map(x => x.toString(16).padStart(2, '0')).join('');
 }
@@ -88,7 +88,7 @@ function viewJoin() {
     if (phrase.trim().length < 8) { er.textContent = 'Use a longer secret phrase so strangers cannot guess it.'; return; }
     const other = seat === 1 ? 2 : 1;
     S = { name, seat, phrase, inbox: await topicOf(phrase, seat), out: await topicOf(phrase, other) };
-    save('hush2-s', S);
+    save('hush3-s', S);
     if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
     viewChat();
   };
@@ -105,7 +105,7 @@ function viewChat() {
   document.getElementById('lo').onclick = () => {
     if (!confirm('Leave this chat on this device?')) return;
     if (es) es.close();
-    ['hush2-s', 'hush2-seen', 'hush2-since'].forEach(k => localStorage.removeItem(k));
+    ['hush3-s', 'hush3-seen', 'hush3-since'].forEach(k => localStorage.removeItem(k));
     S = null; inviteHash = ''; viewJoin();
   };
   document.getElementById('al').onclick = async () => {
@@ -157,8 +157,8 @@ function markSeen() {
   if (document.hidden || !S) return;
   let newest = 0;
   shown.forEach((m, id) => { if (!m.me) { seen.add(id); newest = Math.max(newest, m.time); } });
-  if (newest) { since = newest; save('hush2-since', since); }
-  save('hush2-seen', [...seen].slice(-400));
+  if (newest) { since = newest; save('hush3-since', since); }
+  save('hush3-seen', [...seen].slice(-400));
   document.title = 'Hush';
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { markSeen(); if (S && (!es || es.readyState === 2)) connect(); } });
