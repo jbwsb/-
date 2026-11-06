@@ -1,80 +1,35 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="quest">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Hush</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@400;600&display=swap" rel="stylesheet">
-<script>
-/* Quest is the default look. The Theme button switches to Normal and back. */
-const THEMES = [['quest', 'Quest'], ['normal', 'Normal']];
-let themeIdx = 0;
-document.documentElement.dataset.theme = THEMES[themeIdx][0];
-</script>
 <style>
-/* ---------- Normal (original look) ---------- */
-:root{
-  --font:"Trebuchet MS",system-ui,sans-serif;--hfont:"Arial Narrow","Trebuchet MS",sans-serif;--fs:16px;--h1s:28px;
-  --px:0px;--gpx:0px;--r:10px;--rb:16px;--rd:50%;--bw:1.5px;--lw:1px;--gap:0px;
-  --bodybg:#e3ebee;--ink:#16242d;--hInk:#16242d;--panel:#f3f7f8;--chatbg:#e3ebee;--scan:linear-gradient(transparent,transparent);
-  --topbg:#f3f7f8;--topInk:#16242d;--topbd:#c4d1d8;--frame:transparent;
-  --other:#fff;--otherInk:#16242d;--mine:#16324a;--mineInk:#fff;--bbd:transparent;--mbd:transparent;
-  --name:#4a6070;--time:#7b8d99;--mtime:rgba(255,255,255,.65);--mute:#5d7280;--acc:#f2b705;
-  --btn:#16324a;--btnInk:#fff;--btnbd:transparent;--gbg:transparent;--gInk:#16324a;--gbd:#16324a;
-  --inbg:#fff;--inInk:#16242d;--inbd:#c4d1d8;--dotoff:#aab8c0;--glow:none;
-}
-/* ---------- Quest: warm parchment RPG ---------- */
-:root[data-theme=quest]{
-  --font:'Pixelify Sans','Trebuchet MS',monospace;--hfont:'Pixelify Sans','Trebuchet MS',monospace;--fs:16px;--h1s:34px;
-  --px:3px;--gpx:2px;--r:0;--rb:0;--rd:0;--bw:0px;--lw:3px;--gap:10px;
-  --bodybg:linear-gradient(#3f7cc4 0,#86b9e8 76%,#7cae4e 76%,#5f8f38 90%,#c9a23f 90%);
-  --ink:#3a2414;--hInk:#6b3f26;--panel:#ecd5ae;--chatbg:#f4e3c3;--scan:linear-gradient(transparent,transparent);
-  --topbg:#d9a24f;--topInk:#3a2414;--topbd:#6b3f26;--frame:#6b3f26;
-  --other:#fff6e2;--otherInk:#3a2414;--mine:#d6a04f;--mineInk:#2e1c0d;--bbd:#a9704f;--mbd:#6b3f26;
-  --name:#8a4b2a;--time:#8b6a4d;--mtime:#6b4a2c;--mute:#8b6a4d;--acc:#c0392b;
-  --btn:#c9923f;--btnInk:#2e1c0d;--btnbd:#6b3f26;--gbg:#b57b57;--gInk:#fdf0d8;--gbd:#6b3f26;
-  --inbg:#f7ead0;--inInk:#3a2414;--inbd:#6b3f26;--dotoff:#b89a78;--glow:none;
-}
-
+:root{--bg:#e3ebee;--ink:#16242d;--mine:#16324a;--line:#c4d1d8;--flag:#f2b705;--mute:#5d7280}
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
-body{background:var(--bodybg);color:var(--ink);font:var(--fs)/1.35 var(--font);display:flex;justify-content:center;padding:var(--gap)}
-#app{width:100%;min-width:0;max-width:560px;height:100%;display:flex;flex-direction:column;background:var(--panel);--c:var(--frame);padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
-
-/* pixel-notched borders: four offset shadows, thickness is --px (0 in Normal) */
-#app,button,input,.m{box-shadow:0 calc(var(--px)*-1) 0 0 var(--c),0 var(--px) 0 0 var(--c),calc(var(--px)*-1) 0 0 0 var(--c),var(--px) 0 0 0 var(--c)}
-button.g{box-shadow:0 calc(var(--gpx)*-1) 0 0 var(--c),0 var(--gpx) 0 0 var(--c),calc(var(--gpx)*-1) 0 0 0 var(--c),var(--gpx) 0 0 0 var(--c)}
-
-h1{font-family:var(--hfont);font-size:var(--h1s);font-weight:800;line-height:1;margin:0;color:var(--hInk);text-shadow:var(--glow)}
-.pad{padding:22px 20px;display:flex;flex-direction:column;gap:14px}
-.row{display:flex;justify-content:space-between;align-items:center;gap:10px}
-.sub{color:var(--mute);font-size:.8em;margin:0}
-.err{color:#e0584e;font-size:.9em;min-height:22px}
+body{background:var(--bg);color:var(--ink);font:16px/1.4 "Trebuchet MS",system-ui,sans-serif;display:flex;justify-content:center}
+#app{width:100%;max-width:560px;height:100%;display:flex;flex-direction:column;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+h1{font:800 28px/1 "Arial Narrow","Trebuchet MS",sans-serif;margin:0}
+.pad{padding:20px;display:flex;flex-direction:column;gap:10px}
+.sub{color:var(--mute);font-size:13px;margin:0}.err{color:#b3261e;font-size:14px;min-height:20px}
 button,input{font:inherit}
-input{width:100%;padding:12px 14px;border:var(--bw) solid var(--inbd);border-radius:var(--r);background:var(--inbg);color:var(--inInk);--c:var(--inbd)}
-input::placeholder{color:var(--mute);opacity:.8}
-input:focus,button:focus-visible{outline:3px solid var(--acc);outline-offset:4px}
-button{border:0;border-radius:var(--r);padding:12px 16px;background:var(--btn);color:var(--btnInk);font-weight:700;cursor:pointer;--c:var(--btnbd)}
-button.g{background:var(--gbg);color:var(--gInk);border:var(--bw) solid var(--gbd);padding:6px 10px;font-size:.8em;--c:var(--gbd)}
-.seg{display:flex;gap:12px}
-.seg button{flex:1;padding:10px 8px;font-size:.85em}
-.seg button.on{background:var(--btn);color:var(--btnInk);--c:var(--btnbd)}
-
-.top{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px 14px;background:var(--topbg);color:var(--topInk);border-bottom:var(--lw) solid var(--topbd)}
-.top b{flex:1 1 40%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-shadow:var(--glow)}
-.dot{width:10px;height:10px;border-radius:var(--rd);background:var(--dotoff);flex:none}.dot.on{background:#3fcf7a}
-.msgs{flex:1;overflow:auto;padding:16px 14px;display:flex;flex-direction:column;gap:12px;background:var(--scan),var(--chatbg)}
-.m{max-width:82%;padding:8px 12px;border-radius:var(--rb);background:var(--other);color:var(--otherInk);align-self:flex-start;overflow-wrap:anywhere;--c:var(--bbd);text-shadow:var(--glow)}
-.m.me{background:var(--mine);color:var(--mineInk);align-self:flex-end;--c:var(--mbd)}
-.m b{display:block;font-size:.8em;color:var(--name);font-weight:600}
-.tx{white-space:pre-wrap}
-.m time{display:block;text-align:right;font-size:.7em;color:var(--time);margin-top:3px}
-.m.me time{color:var(--mtime)}
+input{width:100%;padding:12px 14px;border:1.5px solid var(--line);border-radius:10px;background:#fff;color:var(--ink)}
+input:focus,button:focus-visible{outline:3px solid var(--flag);outline-offset:1px}
+button{border:0;border-radius:10px;padding:12px 16px;background:var(--mine);color:#fff;font-weight:700;cursor:pointer}
+button.g{background:transparent;color:var(--mine);border:1.5px solid var(--mine);padding:6px 10px;font-size:13px}
+.seg{display:flex;gap:8px}
+.seg button{flex:1;background:transparent;color:var(--mine);border:1.5px solid var(--line);font-size:14px;padding:10px 8px}
+.seg button.on{background:var(--mine);color:#fff;border-color:var(--mine)}
+.top{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--line);background:#f3f7f8}
+.top b{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dot{width:10px;height:10px;border-radius:50%;background:#aab8c0;flex:none}.dot.on{background:#2e9e5b}
+.msgs{flex:1;overflow:auto;padding:14px;display:flex;flex-direction:column;gap:6px}
+.m{max-width:80%;padding:9px 13px;border-radius:16px;background:#fff;align-self:flex-start;white-space:pre-wrap;overflow-wrap:anywhere}
+.m.me{background:var(--mine);color:#fff;align-self:flex-end}
+.m b{display:block;font-size:12px;opacity:.7}
 .empty{color:var(--mute);margin:auto;text-align:center;padding:20px}
-.send{display:flex;gap:12px;padding:12px 14px;background:var(--panel);border-top:var(--lw) solid var(--topbd)}
-.send input{flex:1;width:auto;min-width:0}
+.send{display:flex;gap:8px;padding:10px 12px;border-top:1px solid var(--line);background:#f3f7f8}
 </style>
 </head>
 <body>
@@ -83,48 +38,25 @@ button.g{background:var(--gbg);color:var(--gInk);border:var(--bw) solid var(--gb
 const NTFY = 'https://ntfy.sh/';
 const $ = document.getElementById('app');
 const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d } catch (e) { return d } };
-const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
-
-/* ----- theme button: Quest <-> Normal ----- */
-function applyTheme() {
-  document.documentElement.dataset.theme = THEMES[themeIdx][0];
-  document.querySelectorAll('.thb').forEach(b => b.textContent = 'Theme: ' + THEMES[themeIdx][1]);
-}
-function bindTheme(b) { b.onclick = () => { themeIdx = (themeIdx + 1) % THEMES.length; applyTheme(); }; applyTheme(); }
-
-/* ----- timestamps ----- */
-function stamp(ms) {
-  const d = new Date(ms), n = new Date();
-  const t = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  return d.toDateString() === n.toDateString() ? t : d.toLocaleDateString([], { day: 'numeric', month: 'short' }) + ', ' + t;
-}
+const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
 
 /* S = { name, seat, phrase, inbox, out }
    Two fixed seats (1 and 2). Each seat has its own private inbox topic.
    You listen on your inbox and send to the other seat's inbox,
    so your own messages never come back as notifications. */
-let S = load('hush2-s', null);
+let S = load('hush3-s', null);
+const seen = new Set(load('hush3-seen', []));
+let since = load('hush3-since', 'all');
+const shown = new Map();
 let es = null;
 
-/* Messages are kept for 12 hours (ntfy also holds them server-side for about 12 hours).
-   The log lives in this device's localStorage so your own sent messages survive a reload too. */
-const KEEP = 12 * 3600 * 1000, LOGK = 'hush2-log';
-const shown = new Map();
-load(LOGK, []).forEach(m => { if (m && m.id && Date.now() - m.ts < KEEP) shown.set(m.id, m); });
-function prune() {
-  const cut = Date.now() - KEEP; let n = 0;
-  shown.forEach((m, id) => { if (m.ts < cut) { shown.delete(id); n++; } });
-  return n;
-}
-function persist() { prune(); save(LOGK, [...shown.values()]); }
-
 async function topicOf(phrase, seat) {
-  const raw = 'hush|' + phrase.trim().toLowerCase() + '|inbox' + seat;
+  const raw = 'hush3|' + phrase.trim().toLowerCase() + '|inbox' + seat;
   const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw));
   return 'hush-' + [...new Uint8Array(b)].slice(0, 16).map(x => x.toString(16).padStart(2, '0')).join('');
 }
 
-/* invite link: site#<phrase> -> opens the join screen with the phrase filled in and seat 2 chosen */
+/* invite link: site#<phrase>  -> opens the join screen with the phrase filled in and seat 2 chosen */
 let inviteHash = '';
 if (location.hash.length > 1) {
   try { inviteHash = decodeURIComponent(location.hash.slice(1)); } catch (e) {}
@@ -133,17 +65,16 @@ if (location.hash.length > 1) {
 
 function viewJoin() {
   let seat = inviteHash ? 2 : 1;
-  $.innerHTML = `<div class="pad"><div class="row"><h1>Hush</h1><button class="g thb" id="th"></button></div>
+  $.innerHTML = `<div class="pad"><h1>Hush</h1>
     <p class="sub">Private chat for two. Pick any name you like.</p>
-    <div class="seg"><button class="g" id="s1">I'm starting this chat</button><button class="g" id="s2">My friend invited me</button></div>
+    <div class="seg" id="sg"><button id="s1">I'm starting this chat</button><button id="s2">My friend invited me</button></div>
     <input id="nm" maxlength="20" placeholder="Your name" autocomplete="off" autocapitalize="off">
     <input id="ph" placeholder="Secret phrase (8+ characters)" autocomplete="off" autocapitalize="off">
     <div class="err" id="er"></div><button id="go">Enter</button></div>`;
-  bindTheme(document.getElementById('th'));
   const ph = document.getElementById('ph');
   const paint = () => {
-    document.getElementById('s1').classList.toggle('on', seat === 1);
-    document.getElementById('s2').classList.toggle('on', seat === 2);
+    document.getElementById('s1').className = seat === 1 ? 'on' : '';
+    document.getElementById('s2').className = seat === 2 ? 'on' : '';
   };
   document.getElementById('s1').onclick = () => { seat = 1; paint(); };
   document.getElementById('s2').onclick = () => { seat = 2; paint(); };
@@ -157,7 +88,7 @@ function viewJoin() {
     if (phrase.trim().length < 8) { er.textContent = 'Use a longer secret phrase so strangers cannot guess it.'; return; }
     const other = seat === 1 ? 2 : 1;
     S = { name, seat, phrase, inbox: await topicOf(phrase, seat), out: await topicOf(phrase, other) };
-    save('hush2-s', S);
+    save('hush3-s', S);
     if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
     viewChat();
   };
@@ -165,18 +96,17 @@ function viewJoin() {
 
 function viewChat() {
   $.innerHTML = `<div class="top"><b id="me"></b><i class="dot" id="st"></i>
-      <button class="g thb" id="th"></button><button class="g" id="al">Alerts</button><button class="g" id="iv">Invite</button><button class="g" id="lo">Leave</button></div>
+      <button class="g" id="al">Alerts</button><button class="g" id="iv">Invite</button><button class="g" id="lo">Leave</button></div>
     <div class="msgs" id="ms"></div>
     <div class="send"><input id="tx" placeholder="Message" autocomplete="off"><button id="sd">Send</button></div>`;
-  bindTheme(document.getElementById('th'));
   document.getElementById('me').textContent = S.name;
   document.getElementById('sd').onclick = send;
   document.getElementById('tx').onkeydown = e => { if (e.key === 'Enter') send(); };
   document.getElementById('lo').onclick = () => {
     if (!confirm('Leave this chat on this device?')) return;
     if (es) es.close();
-    ['hush2-s', 'hush2-seen', 'hush2-since', LOGK].forEach(k => localStorage.removeItem(k));
-    shown.clear(); S = null; inviteHash = ''; viewJoin();
+    ['hush3-s', 'hush3-seen', 'hush3-since'].forEach(k => localStorage.removeItem(k));
+    S = null; inviteHash = ''; viewJoin();
   };
   document.getElementById('al').onclick = async () => {
     if ('Notification' in window && Notification.permission !== 'granted') await Notification.requestPermission();
@@ -194,19 +124,17 @@ function viewChat() {
 
 function connect() {
   if (es) es.close();
-  es = new EventSource(NTFY + S.inbox + '/sse?since=12h');
+  es = new EventSource(NTFY + S.inbox + '/sse?since=' + since);
   es.onopen = () => setDot(true);
   es.onerror = () => setDot(false);          // EventSource retries by itself
   es.onmessage = e => {
     let d; try { d = JSON.parse(e.data); } catch (x) { return; }
-    if (d.event !== 'message' || shown.has(d.id)) return;
+    if (d.event !== 'message' || seen.has(d.id) || shown.has(d.id)) return;
     if (typeof d.message !== 'string' || !d.message) return;
-    const ts = d.time * 1000;
-    if (Date.now() - ts > KEEP) return;
     const n = String(d.title || '?').slice(0, 20), t = d.message.slice(0, 2000);
-    shown.set(d.id, { id: d.id, me: false, n, t, ts });
+    shown.set(d.id, { me: false, n, t, ts: d.time * 1000, time: d.time });
     if (document.hidden) alertMe(n);
-    persist(); render();
+    render(); markSeen();
   };
 }
 function setDot(on) { const s = document.getElementById('st'); if (s) s.className = 'dot' + (on ? ' on' : ''); }
@@ -214,21 +142,26 @@ function setDot(on) { const s = document.getElementById('st'); if (s) s.classNam
 function render() {
   const ms = document.getElementById('ms'); if (!ms) return;
   ms.innerHTML = '';
-  prune();
   const list = [...shown.values()].sort((a, b) => a.ts - b.ts);
-  if (!list.length) ms.innerHTML = '<div class="empty">No messages yet. Chats disappear after 12 hours.</div>';
+  if (!list.length) ms.innerHTML = '<div class="empty">No new messages. Anything you have already read is gone.</div>';
   list.forEach(m => {
     const d = document.createElement('div'); d.className = 'm' + (m.me ? ' me' : '');
     if (!m.me) { const b = document.createElement('b'); b.textContent = m.n; d.appendChild(b); }
-    const tx = document.createElement('div'); tx.className = 'tx'; tx.textContent = m.t; d.appendChild(tx);
-    const tm = document.createElement('time'); tm.textContent = stamp(m.ts); d.appendChild(tm);
-    ms.appendChild(d);
+    d.appendChild(document.createTextNode(m.t)); ms.appendChild(d);
   });
   ms.scrollTop = ms.scrollHeight;
 }
 
-document.addEventListener('visibilitychange', () => { if (!document.hidden) { document.title = 'Hush'; if (S && (!es || es.readyState === 2)) connect(); } });
-setInterval(() => { if (S && prune()) { persist(); render(); } }, 60000);
+/* once a message has been on a visible screen it counts as read on this device and will not come back */
+function markSeen() {
+  if (document.hidden || !S) return;
+  let newest = 0;
+  shown.forEach((m, id) => { if (!m.me) { seen.add(id); newest = Math.max(newest, m.time); } });
+  if (newest) { since = newest; save('hush3-since', since); }
+  save('hush3-seen', [...seen].slice(-400));
+  document.title = 'Hush';
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { markSeen(); if (S && (!es || es.readyState === 2)) connect(); } });
 
 function alertMe(name) {
   document.title = '(1) New message';
@@ -247,9 +180,8 @@ async function send() {
     if (location.protocol.startsWith('http')) msg.click = location.href.split('#')[0].split('?')[0];
     const r = await fetch(NTFY, { method: 'POST', body: JSON.stringify(msg) });
     if (!r.ok) throw 0;
-    const id = 'L' + Date.now() + Math.random();
-    shown.set(id, { id, me: true, n: S.name, t: text, ts: Date.now() });
-    persist(); render();
+    shown.set('L' + Date.now() + Math.random(), { me: true, n: S.name, t: text, ts: Date.now(), time: 0 });
+    render();
   } catch (e) { tx.value = text; alert('Could not send. Check your connection and try again.'); }
 }
 
