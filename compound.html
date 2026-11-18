@@ -1,0 +1,1136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Compound - isometric pixel diorama</title>
+<style>
+  :root { color-scheme: light; }
+  html, body { margin: 0; height: 100%; background: #fff; overflow: hidden; overscroll-behavior: none;
+    touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+    font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #1c1b19; }
+  #stage { position: fixed; left: 0; top: 0; width: 100%; display: flex; align-items: center; justify-content: center; }
+  #wrap { position: relative; line-height: 0; }
+  #c { display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+  #dbg { position: absolute; left: 0; top: 0; pointer-events: none; }
+  #hud { position: fixed; left: 8px; top: max(8px, env(safe-area-inset-top)); white-space: pre; pointer-events: none;
+    font-size: 11px; line-height: 1.4; color: #1c1b19; text-shadow: 0 0 3px #fff, 0 0 3px #fff, 0 0 3px #fff; }
+  #hint { position: fixed; left: 0; right: 0; bottom: 8px; text-align: center; pointer-events: none; color: #6b675e; font-size: 11px; }
+  body.touch #hint { display: none; }
+  #pad { position: fixed; left: 0; right: 0; bottom: 0; height: 172px; display: none; }
+  body.touch #pad { display: block; }
+  #stick { position: absolute; left: 22px; bottom: calc(24px + env(safe-area-inset-bottom)); width: 124px; height: 124px;
+    border-radius: 50%; border: 2px solid #1c1b19; background: rgba(255,255,255,.7); touch-action: none; }
+  #knob { position: absolute; left: 36px; top: 36px; width: 48px; height: 48px; border-radius: 50%; background: #1c1b19; }
+  #btns { position: absolute; right: 14px; bottom: calc(24px + env(safe-area-inset-bottom)); display: grid;
+    grid-template-columns: repeat(3, 58px); gap: 8px; }
+  button { font: inherit; font-size: 13px; height: 46px; border: 2px solid #1c1b19; background: #fff; color: #1c1b19;
+    border-radius: 0; padding: 0; touch-action: none; }
+  button.on { background: #1c1b19; color: #fff; }
+  button:focus-visible { outline: 3px solid #2a6cdf; outline-offset: 2px; }
+</style>
+</head>
+<body>
+<div id="stage"><div id="wrap"><canvas id="c"></canvas><canvas id="dbg"></canvas></div></div>
+<div id="hud"></div>
+<div id="hint">WASD / arrows move &middot; Q E or drag to rotate &middot; wheel zoom &middot; F debug &middot; L light &middot; Shift run</div>
+<div id="pad">
+  <div id="stick"><div id="knob"></div></div>
+  <div id="btns">
+    <button id="bL" aria-label="Rotate left">&#x27F2;</button>
+    <button id="bR" aria-label="Rotate right">&#x27F3;</button>
+    <button id="bD">DBG</button>
+    <button id="bZm" aria-label="Zoom out">&minus;</button>
+    <button id="bZp" aria-label="Zoom in">+</button>
+    <button id="bLt">LIT</button>
+  </div>
+</div>
+
+<script>
+(() => {
+'use strict';
+/* =====================================================================
+   COMPOUND - isometric pixel diorama, built from the hand-drawn blueprint.
+   Software rasteriser: per-pixel ray casts, depth buffer, Bayer dither,
+   hue-shifted ramps, depth-buffer edges. No images, no libraries.
+   World units: 1 u = 1 blueprint-pixel * K. Human = 2.8 u (~1.8 m).
+   ===================================================================== */
+
+const $ = id => document.getElementById(id);
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+
+/* ---------- tunables (all dimensions live here so debug stays honest) ---------- */
+const K = 0.068;                 // blueprint px -> world units
+const HUMAN_H = 2.8;             // person height (u)
+const STOREY = 3.4;              // one storey (u)
+const BLD_H = STOREY * 4;        // 4-storey white buildings
+const CHAMBER_H = STOREY;        // chambers: ASSUMED one storey (not given in the blueprint)
+const WALL_H = 3.6, WALL_T = 0.9;// main white wall; the net fence is the same height
+const ROOF_Z0 = 4.4, ROOF_Z1 = 5.0; // roof extension slab
+const PILLAR_R = 0.8;
+const PATH_W = 3.2;              // orange trail = pavement width
+const M_PER_U = 1.8 / HUMAN_H;   // debug only: metres per unit
+
+/* ---------- camera maths (same 30 degree orthographic camera as pixel-plays) ---------- */
+const SIN = .5, COS = Math.sqrt(3) / 2, R2 = Math.SQRT2;
+const DZ = R2 * SIN / COS;       // view-ray z per unit t, with camera-space ray (1,1,DZ)
+const KD = R2 * COS + DZ * SIN;  // depth gained per unit t along the ray
+const GRADIENT_UNIT = COS / SIN; // ground depth per row = GRADIENT_UNIT / SS
+const EDGE = .28;
+
+let W = 360, H = 280, SS = 8, OX = 180, OY = 170;
+let canvas, ctx, image, pix, zb, groundZ, shadowMask, gxMap, gyMap, rowD0;
+let dbg, dctx, dbgK = 1, cssScale = 1;
+const cam = { yaw: 0 };
+const player = { x: 0, y: 0, yaw: -Math.PI / 2, phase: 0, moving: 0 };
+let cs = 1, sn = 0, px = 0, py = 0;
+let LHx = -.7071, LHy = .7071, SXo = .85, SYo = -.85;   // light (toward) & shadow offset per unit height
+const SK = 1.2;
+let lightLocked = true, debug = false;
+let pcx = 0, pcy = 0, pDepth = 0;
+
+const rgb = (r, g, b) => (255 << 24 | Math.min(255, b | 0) << 16 | Math.min(255, g | 0) << 8 | Math.min(255, r | 0)) >>> 0;
+const WHITE_PX = rgb(255, 255, 255);
+const COOL = [46, 38, 84], WARM = [255, 232, 180];
+const rampCache = new Map();
+function rampOf(c) {            // hue-shifted ramp: shadows drift violet, lights drift warm
+  const key = c.join(',');
+  let r = rampCache.get(key);
+  if (r) return r;
+  const mix = (m, t, k) => rgb(lerp(c[0] * m, t[0], k), lerp(c[1] * m, t[1], k), lerp(c[2] * m, t[2], k));
+  r = [mix(.4, COOL, .34), mix(.62, COOL, .18), mix(.84, COOL, .05), mix(1, WARM, 0), mix(1.1, WARM, .22)];
+  rampCache.set(key, r);
+  return r;
+}
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map(v => (v + .5) / 16);
+const bayerAt = (ix, iy) => BAYER[(iy & 3) * 4 + (ix & 3)];
+function ih(x, y) {
+  let h = Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+function noise2(x, y) {
+  const ix = Math.floor(x), iy = Math.floor(y);
+  let fx = x - ix, fy = y - iy;
+  fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy);
+  const a = ih(ix, iy), b = ih(ix + 1, iy), c = ih(ix, iy + 1), d = ih(ix + 1, iy + 1);
+  return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
+}
+function tint(i, r, g, b) {
+  const c = pix[i];
+  pix[i] = rgb((c & 255) * r, (c >> 8 & 255) * g, (c >> 16 & 255) * b);
+}
+
+/* world -> screen (camera follows the player, rotated by cam.yaw) */
+const _p = { sx: 0, sy: 0, d: 0 };
+function proj(x, y, z) {
+  const dx = x - px, dy = y - py;
+  const cx = dx * cs - dy * sn, cy = dx * sn + dy * cs;
+  const v = (cx + cy) / R2;
+  _p.sx = OX + (cx - cy) / R2 * SS;
+  _p.sy = OY + (v * SIN - z * COS) * SS;
+  _p.d = v * COS + z * SIN;
+  return _p;
+}
+
+/* =====================================================================
+   THE BLUEPRINT  (coordinates are blueprint pixels; P() / K convert to u)
+   ===================================================================== */
+const LAND = { x0: -90 * K, y0: -560 * K, x1: 2140 * K, y1: 2060 * K };
+const CELL = .5, INVC = 1 / CELL;
+const GW = Math.ceil((LAND.x1 - LAND.x0) * INVC), GH = Math.ceil((LAND.y1 - LAND.y0) * INVC);
+const grid = new Uint8Array(GW * GH);
+const M = { VOID: 0, OUT: 1, PLAIN: 2, PAVE: 3, GRASS: 4, FIELD: 5, COURT: 6, ASPH: 7, ROOFF: 8 };
+const MAT_NAME = ['void', 'outside ground', 'plain ground', 'pavement path', 'grass (walkable)', 'field (trimmed grass)', 'basketball court', 'asphalt road', 'roof-extension floor'];
+const P = pts => pts.map(([x, y]) => [x * K, y * K]);
+
+function inPoly(x, y, poly) {
+  let c = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i], b = poly[j];
+    if ((a[1] > y) !== (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]) c = !c;
+  }
+  return c;
+}
+function paintPoly(poly, m) {
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const [x, y] of poly) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+  const i0 = Math.max(0, Math.floor((x0 - LAND.x0) * INVC)), i1 = Math.min(GW - 1, Math.ceil((x1 - LAND.x0) * INVC));
+  const j0 = Math.max(0, Math.floor((y0 - LAND.y0) * INVC)), j1 = Math.min(GH - 1, Math.ceil((y1 - LAND.y0) * INVC));
+  for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+    if (inPoly(LAND.x0 + (i + .5) * CELL, LAND.y0 + (j + .5) * CELL, poly)) grid[j * GW + i] = m;
+  }
+}
+const paintRect = (x0, y0, x1, y1, m) => paintPoly(P([[x0, y0], [x1, y0], [x1, y1], [x0, y1]]), m);
+function distSeg(x, y, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+  const t = l2 ? clamp(((x - ax) * dx + (y - ay) * dy) / l2, 0, 1) : 0;
+  return Math.hypot(x - (ax + t * dx), y - (ay + t * dy));
+}
+function paintStroke(pts, w, m) {
+  const q = P(pts), r = w / 2;
+  for (let s = 0; s < q.length - 1; s++) {
+    const [ax, ay] = q[s], [bx, by] = q[s + 1];
+    const i0 = Math.max(0, Math.floor((Math.min(ax, bx) - r - LAND.x0) * INVC)), i1 = Math.min(GW - 1, Math.ceil((Math.max(ax, bx) + r - LAND.x0) * INVC));
+    const j0 = Math.max(0, Math.floor((Math.min(ay, by) - r - LAND.y0) * INVC)), j1 = Math.min(GH - 1, Math.ceil((Math.max(ay, by) + r - LAND.y0) * INVC));
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+      if (distSeg(LAND.x0 + (i + .5) * CELL, LAND.y0 + (j + .5) * CELL, ax, ay, bx, by) <= r) grid[j * GW + i] = m;
+    }
+  }
+}
+function matAt(x, y) {
+  const i = Math.floor((x - LAND.x0) * INVC), j = Math.floor((y - LAND.y0) * INVC);
+  return i < 0 || j < 0 || i >= GW || j >= GH ? 0 : grid[j * GW + i];
+}
+
+/* ---- ground layers, painted in order ---- */
+grid.fill(M.OUT);
+// everything inside the white wall
+paintPoly(P([[60, 105], [435, 100], [445, -560], [1900, -560], [1900, 205], [1690, 235], [1655, 300], [1650, 560], [1700, 605],
+  [1840, 635], [1850, 1200], [1660, 1245], [1580, 1238], [930, 1232], [930, 1895], [40, 1895], [30, 1670], [85, 950], [25, 925],
+  [25, 575], [60, 555]]), M.PLAIN);
+// the "Field": extended plain trimmed grass, runs off the top of the map
+paintPoly(P([[950, -560], [1900, -560], [1900, 205], [1690, 235], [1655, 300], [1650, 420], [950, 420]]), M.FIELD);
+// "Grass" walkable areas
+paintRect(482, 330, 622, 912, M.GRASS);        // strip beside the court, with the tree
+paintRect(92, 1262, 436, 1620, M.GRASS);       // lower-left lawn
+paintRect(990, 400, 1560, 1045, M.GRASS);      // park + grass block
+// grass verge outside the gate / entrance (between wall and road)
+paintPoly(P([[940, 1245], [1860, 1245], [1860, 1298], [1552, 1298], [1190, 1342], [1122, 1400], [1128, 1845], [1480, 1855],
+  [1565, 1885], [1570, 2060], [940, 2060]]), M.GRASS);
+// asphalt road outside the gate
+paintPoly(P([[1190, 1342], [1552, 1298], [2140, 1298], [2140, 2060], [1570, 2060], [1565, 1885], [1480, 1855], [1128, 1845], [1122, 1400]]), M.ASPH);
+// orange trail = pavement
+const TRAILS = [
+  [[738, -560], [738, 48], [745, 130], [775, 230], [790, 330], [790, 420], [785, 520], [797, 600], [812, 720], [825, 900], [845, 1050], [853, 1125], [832, 1155], [816, 1230], [822, 1330], [800, 1372]],
+  [[853, 1125], [1000, 1114], [1250, 1106], [1510, 1108], [1562, 1140], [1590, 1200], [1600, 1245], [1600, 1300]],
+  [[757, 150], [960, 125]],
+  [[783, 520], [1000, 503]],
+  [[1600, 1285], [1590, 1150], [1590, 1000], [1600, 800], [1620, 732], [1665, 708]],
+  [[1590, 1062], [1655, 1062]],
+  [[800, 1372], [700, 1356], [500, 1350], [262, 1362], [238, 1340], [228, 1262], [150, 1256], [130, 1150], [125, 930], [110, 700], [100, 300], [104, 205], [200, 170], [280, 150], [400, 158], [450, 172], [466, 260], [466, 330], [620, 326], [790, 322]],
+  [[600, 170], [628, 350], [632, 600], [630, 880], [604, 905], [470, 916], [130, 925]],
+  [[790, 1375], [785, 1440], [752, 1478], [520, 1480], [522, 1560], [528, 1660]],
+];
+for (const t of TRAILS) paintStroke(t, PATH_W, M.PAVE);
+const COURT = { x0: 120 * K, y0: 490 * K, x1: 470 * K, y1: 905 * K };
+paintRect(120, 490, 470, 905, M.COURT);          // open basketball court, blue floor
+paintRect(440, 1365, 710, 1575, M.ROOFF);        // floor under the roof extension
+
+/* =====================================================================
+   SOLID GEOMETRY: axis-aligned boxes + vertical cylinders, hit per pixel
+   ===================================================================== */
+const BOXES = [];
+function addBox(o) {
+  const b = Object.assign({ solid: true, cut: true, tex: 'plain', type: 'box' }, o);
+  b.ramp = rampOf(b.color);
+  BOXES.push(b);
+  return b;
+}
+const bp = (kind, name, x0, y0, x1, y1, z0, z1, color, extra) =>
+  addBox(Object.assign({ kind, name, x0: x0 * K, y0: y0 * K, x1: x1 * K, y1: y1 * K, z0, z1, color }, extra));
+
+const C_WALL = [238, 236, 230], C_BLD = [246, 244, 238], C_CHAMBER = [226, 208, 176], C_NET = [84, 96, 118];
+let nW = 0;
+function wallSeg(ax, ay, bx, by) {            // axis-aligned wall run, centre-line in blueprint px
+  const h = WALL_T / 2 / K;
+  bp('wall', 'WALL ' + (++nW), Math.min(ax, bx) - h, Math.min(ay, by) - h, Math.max(ax, bx) + h, Math.max(ay, by) + h, 0, WALL_H, C_WALL, { tex: 'wall' });
+}
+let nF = 0;
+function fenceSeg(ax, ay, bx, by) {           // net fence: same height as the wall
+  const vert = ax === bx, h = .07 / K;
+  const x0 = Math.min(ax, bx) - (vert ? h : 0), x1 = Math.max(ax, bx) + (vert ? h : 0);
+  const y0 = Math.min(ay, by) - (vert ? 0 : h), y1 = Math.max(ay, by) + (vert ? 0 : h);
+  bp('fence', 'NET FENCE ' + (++nF), x0, y0, x1, y1, 0, WALL_H, C_NET, { tex: 'net', cut: false });
+  const len = vert ? Math.abs(by - ay) : Math.abs(bx - ax), n = Math.max(1, Math.round(len / 100));
+  const q = .2 / K;
+  for (let i = 0; i <= n; i++) {
+    const t = i / n, cx = lerp(ax, bx, t), cy = lerp(ay, by, t);
+    bp('fencepost', 'post', cx - q, cy - q, cx + q, cy + q, 0, WALL_H + .25, [70, 78, 96], { cut: false });
+  }
+}
+// main white wall (blueprint's thick brown line)
+wallSeg(60, 102, 440, 102);  wallSeg(440, -560, 440, 102);
+wallSeg(58, 102, 58, 558);   wallSeg(25, 558, 58, 558);  wallSeg(25, 558, 25, 938);  wallSeg(25, 938, 85, 938);
+wallSeg(30, 1660, 85, 1660); wallSeg(30, 1660, 30, 1895); wallSeg(30, 1895, 930, 1895);
+wallSeg(930, 1895, 930, 1560);                       // gate opening 1350..1560
+wallSeg(930, 1350, 930, 1236);
+wallSeg(930, 1236, 1580, 1236);                      // entrance opening 1580..1662
+wallSeg(1662, 1240, 1850, 1240); wallSeg(1850, 630, 1850, 1240); wallSeg(1652, 630, 1850, 630);
+wallSeg(1652, 232, 1652, 630);   wallSeg(1652, 232, 1900, 232); wallSeg(1900, -560, 1900, 232);
+// net fences (the X lines)
+fenceSeg(940, -560, 940, 100); fenceSeg(940, 150, 940, 415);   // gap where the path crosses into the field
+fenceSeg(675, 410, 680, 975);
+fenceSeg(85, 945, 85, 1655);
+// gate + entrance pillars
+const gatePil = (x, y) => bp('gate', 'GATE PILLAR', x - 8, y - 8, x + 8, y + 8, 0, 4.6, C_WALL, { tex: 'wall' });
+gatePil(930, 1350); gatePil(930, 1560);
+bp('entrance', 'ENTRANCE PILLAR', 1572, 1228, 1588, 1244, 0, 4.6, C_WALL, { tex: 'wall' });
+bp('entrance', 'ENTRANCE PILLAR', 1654, 1232, 1670, 1248, 0, 4.6, C_WALL, { tex: 'wall' });
+
+// 4-storey white buildings (cross-hatched on the blueprint)
+bp('building', 'BUILDING A', 110, 170, 440, 480, 0, BLD_H, C_BLD, { tex: 'bld' });
+bp('building', 'BUILDING B', 165, 930, 685, 1230, 0, BLD_H, C_BLD, { tex: 'bld' });
+bp('building', 'BUILDING C', 45, 1620, 350, 1880, 0, BLD_H, C_BLD, { tex: 'bld' });
+bp('building', 'BUILDING D', 385, 1575, 805, 1890, 0, BLD_H, C_BLD, { tex: 'bld' });
+// chambers (single-slash boxes) - not enterable
+bp('chamber', 'CHAMBER 1', 1690, 650, 1840, 880, 0, CHAMBER_H, C_CHAMBER, { tex: 'chamber' });
+bp('chamber', 'CHAMBER 2', 1675, 905, 1820, 1110, 0, CHAMBER_H, C_CHAMBER, { tex: 'chamber' });
+bp('chamber', 'CHAMBER 3', 1655, 1125, 1830, 1215, 0, CHAMBER_H, C_CHAMBER, { tex: 'chamber' });
+// roof extension: slab on two big pillars, chairs only under its right side
+bp('roof', 'ROOF EXTENSION', 440, 1365, 710, 1575, ROOF_Z0, ROOF_Z1, [228, 224, 214], { solid: false });
+for (const [cx, cy] of [[480, 1395], [655, 1395]]) {
+  const r = PILLAR_R;
+  addBox({ kind: 'pillar', name: 'BIG PILLAR', type: 'cyl', cx: cx * K, cy: cy * K, r, x0: cx * K - r, x1: cx * K + r, y0: cy * K - r, y1: cy * K + r, z0: 0, z1: ROOF_Z0, color: [244, 242, 236], tex: 'pillar' });
+}
+for (const cy of [1490, 1535]) for (const cx of [590, 630, 670]) {
+  const s = .55 / K;
+  bp('chair', 'CHAIR', cx - s, cy - s, cx + s, cy + s, .6, .95, [206, 96, 66], {});                  // seat
+  bp('chair', 'CHAIR', cx - s, cy - s, cx + s, cy - s + .22 / K, .95, 1.9, [206, 96, 66], {});        // back
+  bp('chair', 'CHAIR', cx - s * .55, cy - s * .55, cx + s * .55, cy + s * .55, 0, .6, [150, 70, 50], {}); // base
+}
+// basketball hoops (court ends)
+for (const [yb, yp] of [[500, 528], [900, 872]]) {
+  const cx = 295;
+  bp('hoop', 'HOOP POLE', cx - 3, (yb < 700 ? 523 : 893) - 3, cx + 3, (yb < 700 ? 523 : 893) + 3, 0, 5.8, [92, 92, 104], {});
+  bp('hoop', 'BACKBOARD', cx - 22, yp - 3, cx + 22, yp + 3, 4.5, 6.7, [236, 236, 242], { solid: false });
+}
+// under-construction sign at the top ("close")
+const SIGN = { x0: 515, x1: 615, y: 62, z0: 2.1, z1: 4.7 };
+bp('sign', 'SIGN LEG', 523, 58, 529, 66, 0, SIGN.z0, [70, 70, 76], {});
+bp('sign', 'SIGN LEG', 601, 58, 607, 66, 0, SIGN.z0, [70, 70, 76], {});
+bp('sign', 'UNDER CONSTRUCTION SIGN', SIGN.x0, SIGN.y - 2, SIGN.x1, SIGN.y + 2, SIGN.z0, SIGN.z1, [250, 205, 40], { tex: 'sign', solid: false });
+
+/* collision set: anything that reaches head height */
+const SOLIDS = BOXES.filter(b => b.solid && b.z0 < HUMAN_H);
+
+/* =====================================================================
+   SPHERES: trees, palms, hoop rims (rendered per frame so they rotate)
+   ===================================================================== */
+const SPH = [];                 // {x,y,z,r,ramp,mode,leaf,k}
+const SHADOW_ELL = [];          // static ellipse stamps {x,y,z,r}
+const BARK = [92, 74, 60], LEAF_DEEP = [58, 84, 62], LEAF_MID = [100, 126, 78], LEAF_SILVER = [146, 162, 112];
+const PALM_LEAF = [52, 104, 60], PALM_LEAF2 = [92, 140, 70];
+function chain(a, b, r0, r1, col, mode, leaf, k0) {
+  const len = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+  const n = Math.max(1, Math.ceil(len / (Math.min(r0, r1) * .5)));
+  const ramp = rampOf(col);
+  for (let k = 0; k <= n; k++) {
+    const t = k / n;
+    SPH.push({ x: lerp(a[0], b[0], t), y: lerp(a[1], b[1], t), z: lerp(a[2], b[2], t), r: lerp(r0, r1, t), ramp, mode, leaf: !!leaf, k: (k0 || 0) + k });
+  }
+}
+const CROWN = [[.1, 0, 3.7, 1.6], [-1.4, -.7, 3.3, 1.2], [1.6, .7, 3.4, 1.25], [-.6, 1.1, 3.9, 1.1], [.9, -1.1, 4, 1.1], [.2, .1, 4.9, 1.05]];
+function addTree(pxX, pxY, scale, count, seed) {
+  const x = pxX * K, y = pxY * K, s = scale;
+  chain([x, y, 0], [x + .3 * s, y + .1 * s, 2.2 * s], .36 * s, .22 * s, BARK, 'rough');
+  chain([x + .3 * s, y + .1 * s, 2.2 * s], [x - .8 * s, y - .4 * s, 3.3 * s], .2 * s, .13 * s, BARK, 'rough');
+  chain([x + .3 * s, y + .1 * s, 2.2 * s], [x + 1.2 * s, y + .4 * s, 3.4 * s], .2 * s, .13 * s, BARK, 'rough');
+  const ramps = [rampOf(LEAF_DEEP), rampOf(LEAF_MID), rampOf(LEAF_SILVER)];
+  for (let n = 0; n < count; n++) {
+    const k = n + seed, c = CROWN[n % CROWN.length];
+    const a = ih(k, 7) * 6.283, tilt = ih(k, 8) * 2 - 1, d = Math.cbrt(ih(k, 9)) * c[3], flat = Math.sqrt(1 - tilt * tilt);
+    const rx = c[0] + Math.cos(a) * flat * d, ry = c[1] + Math.sin(a) * flat * d, rz = c[2] + tilt * d * .8;
+    const tone = ih(k, 10) + (rz - 4.2) * .22 + (d / c[3] - .5) * .3;
+    SPH.push({ x: x + rx * s, y: y + ry * s, z: rz * s, r: (.2 + ih(k, 11) * .22) * s, ramp: tone > .72 ? ramps[2] : tone > .3 ? ramps[1] : ramps[0], mode: 'rough', leaf: true, k });
+  }
+  for (const c of CROWN) SHADOW_ELL.push({ x: x + c[0] * s, y: y + c[1] * s, z: c[2] * s, r: c[3] * s * .95 });
+  SHADOW_ELL.push({ x, y, z: .4, r: .5 * s });
+  addTrunkSolid(x, y, .55 * s);
+}
+function addPalm(pxX, pxY, h, lean, seed) {
+  const x = pxX * K, y = pxY * K, la = ih(seed, 3) * 6.283, lx = Math.cos(la) * lean, ly = Math.sin(la) * lean;
+  let prev = [x, y, 0];
+  for (let i = 1; i <= 6; i++) {
+    const t = i / 6, cur = [x + lx * t * t, y + ly * t * t, h * t];
+    chain(prev, cur, lerp(.4, .26, (i - 1) / 6), lerp(.4, .26, i / 6), BARK, 'rough');
+    prev = cur;
+  }
+  const top = prev;
+  for (let f = 0; f < 9; f++) {
+    const a = f / 9 * 6.283 + ih(seed, f) * .5, ca = Math.cos(a), sa = Math.sin(a);
+    let p0 = top.slice();
+    for (let s = 1; s <= 4; s++) {
+      const t = s / 4, p1 = [top[0] + ca * 3.0 * t, top[1] + sa * 3.0 * t, top[2] + .9 * Math.sin(t * 2.2) - 1.5 * t * t];
+      chain(p0, p1, lerp(.3, .12, (s - 1) / 4), lerp(.3, .12, s / 4), f % 2 ? PALM_LEAF : PALM_LEAF2, 'rough', true, seed * 10 + f);
+      p0 = p1;
+    }
+    SHADOW_ELL.push({ x: top[0] + ca * 1.7, y: top[1] + sa * 1.7, z: top[2] - .6, r: 1.1 });
+  }
+  addTrunkSolid(x, y, .5);
+}
+const TRUNKS = [];
+function addTrunkSolid(x, y, r) { TRUNKS.push({ kind: 'trunk', name: 'TREE TRUNK', x0: x - r, x1: x + r, y0: y - r, y1: y + r, z0: 0, z1: 3, solid: true }); }
+addTree(552, 505, 1.3, 300, 11);                       // the tree beside the court
+for (const [tx, i] of [[1060, 1], [1160, 2], [1290, 3], [1420, 4]]) addTree(tx, 392, 1.05, 200, i * 41);
+for (const [tx, ty, i] of [[1040, 700, 1], [1130, 690, 2], [1230, 704, 3], [1330, 692, 4], [1420, 706, 5], [1510, 696, 6]]) addPalm(tx, ty, 6.4 + (i % 3) * .6, 1.2, i * 17);
+// hoop rims
+for (const [cy, dir] of [[560, 1], [868, -1]]) {
+  for (let k = 0; k < 10; k++) {
+    const a = k / 10 * 6.283;
+    SPH.push({ x: 295 * K + Math.cos(a) * .85, y: cy * K + Math.sin(a) * .85, z: 4.7, r: .13, ramp: rampOf([232, 110, 40]), mode: 'solid', leaf: false, k });
+  }
+}
+for (const t of TRUNKS) SOLIDS.push(t);
+
+/* grass tufts (stepped wind, whole pixels) */
+const TUFTS = [];
+(function growGrass() {
+  for (let j = 0; j < GH; j++) for (let i = 0; i < GW; i++) {
+    const m = grid[j * GW + i];
+    if (m !== M.GRASS && m !== M.FIELD) continue;
+    if (ih(i * 3, j * 5) > (m === M.GRASS ? .2 : .08)) continue;
+    const x = LAND.x0 + (i + ih(i, j) ) * CELL, y = LAND.y0 + (j + ih(j, i)) * CELL;
+    if (matAt(x, y) !== m) continue;
+    TUFTS.push({ x, y, h: 1 + (ih(i, j * 2) * 3 | 0), base: Math.round(noise2(x * .3, y * .3) * 2.2), ph: x * .11 + y * .19 + ih(i, j) * .9,
+      bloom: ih(i * 7, j) < .03 ? (ih(i, j) > .5 ? rgb(250, 246, 226) : rgb(240, 200, 84)) : 0 });
+  }
+})();
+const GRASS = [[34, 62, 50], [52, 88, 52], [82, 118, 54], [124, 146, 62], [168, 172, 76]].map(c => rgb(c[0], c[1], c[2]));
+const GRASS_DARK = [[34, 62, 50], [52, 88, 52], [82, 118, 54], [124, 146, 62], [168, 172, 76]].map(c => rgb(c[0] * .54, c[1] * .52, c[2] * .72));
+
+/* debug-only annotations */
+const ZONES = [
+  { name: 'BASKETBALL COURT (blue floor)', x0: 120, y0: 490, x1: 470, y1: 905, col: '#1e63d6' },
+  { name: 'FIELD (trimmed grass)', x0: 950, y0: -560, x1: 1900, y1: 420, col: '#2f8f3a' },
+  { name: 'GRASS + PARK (walkable)', x0: 990, y0: 400, x1: 1560, y1: 1045, col: '#2f8f3a' },
+  { name: 'GRASS (walkable)', x0: 482, y0: 330, x1: 622, y1: 912, col: '#2f8f3a' },
+  { name: 'GRASS (walkable)', x0: 92, y0: 1262, x1: 436, y1: 1620, col: '#2f8f3a' },
+  { name: 'ASPHALT ROAD', x0: 1122, y0: 1298, x1: 2140, y1: 2060, col: '#555' },
+  { name: 'ROOF-EXT FLOOR', x0: 440, y0: 1365, x1: 710, y1: 1575, col: '#b8860b' },
+];
+const MARKS = [
+  { name: 'GATE (open, ' + (210 * K).toFixed(1) + 'u wide)', x: 930, y: 1455, z: 5.4 },
+  { name: 'ENTER (' + (82 * K).toFixed(1) + 'u wide)', x: 1620, y: 1236, z: 5.6 },
+  { name: 'CLOSE: path ends here', x: 565, y: 125, z: .2 },
+  { name: 'PAVEMENT PATH w' + PATH_W + 'u', x: 740, y: 700, z: .2 },
+  { name: 'PAVEMENT PATH w' + PATH_W + 'u', x: 1250, y: 1106, z: .2 },
+  { name: 'ROAD', x: 1650, y: 1690, z: .2 },
+];
+
+/* =====================================================================
+   RENDERING
+   ===================================================================== */
+const SIGN_FONT = {
+  C: ['111', '100', '100', '100', '111'], L: ['100', '100', '100', '100', '111'], O: ['111', '101', '101', '101', '111'],
+  S: ['111', '100', '111', '001', '111'], E: ['111', '100', '110', '100', '111'], D: ['110', '101', '101', '101', '110'],
+};
+const SIGN_TEXT = 'CLOSED';
+const YEL = rampOf([252, 208, 40]), BLK = rampOf([44, 42, 40]), GLASS = rampOf([66, 94, 132]);
+
+function frameLight() {
+  if (lightLocked) {  // light stays put relative to the viewer: shadows always fall screen-right
+    LHx = -.7071 * cs + .7071 * sn;
+    LHy = .7071 * sn + .7071 * cs;
+  } else { LHx = -.7071; LHy = .7071; }
+  SXo = -LHx * SK; SYo = -LHy * SK;
+}
+
+function groundColor(m, gx, gy, ix, iy) {
+  const bd = bayerAt(ix, iy) - .5;
+  switch (m) {
+    case M.PLAIN: {
+      const r = rampOf([214, 198, 164]);
+      const l = 3 + (noise2(gx * .33, gy * .33) - .5) * 1.1 + (ih(Math.floor(gx * 4), Math.floor(gy * 4)) - .5) * .5;
+      return r[clamp(Math.floor(l + bd * .55), 0, 4)];
+    }
+    case M.OUT: {
+      const r = rampOf([232, 228, 218]);
+      const l = 3 + (noise2(gx * .4, gy * .4) - .5) * .8;
+      return r[clamp(Math.floor(l + bd * .55), 0, 4)];
+    }
+    case M.PAVE: {
+      const r = rampOf([196, 194, 202]);
+      let l = 3 + (ih(Math.floor(gx * 3), Math.floor(gy * 3)) - .5) * .5;
+      const fx = gx / 2.4 - Math.floor(gx / 2.4), fy = gy / 2.4 - Math.floor(gy / 2.4);
+      if (fx < .05 || fy < .05) l -= 1.2;
+      return r[clamp(Math.floor(l + bd * .5), 0, 4)];
+    }
+    case M.GRASS: {
+      let l = 2.5 + (noise2(gx * .28, gy * .28) - .5) * 1.7;
+      const sp = ih(Math.floor(gx * 5), Math.floor(gy * 5));
+      if (sp > .86) l += 1; else if (sp < .1) l -= 1;
+      return GRASS[clamp(Math.floor(l + bd * .6), 0, 4)];
+    }
+    case M.FIELD: {
+      const r = rampOf([126, 164, 66]);
+      let l = 3 + (noise2(gx * .2, gy * .2) - .5) * .5 + ((Math.floor(gx / 7.5) & 1) ? .45 : -.1);
+      l += (ih(Math.floor(gx * 4), Math.floor(gy * 4)) - .5) * .35;
+      return r[clamp(Math.floor(l + bd * .5), 0, 4)];
+    }
+    case M.COURT: {
+      const r = rampOf([54, 102, 180]);
+      let l = 3 + (noise2(gx * .5, gy * .5) - .5) * .3;
+      if (courtLine(gx, gy)) return rampOf([246, 246, 240])[clamp(Math.floor(3 + bd * .5), 2, 4)];
+      return r[clamp(Math.floor(l + bd * .5), 0, 4)];
+    }
+    case M.ASPH: {
+      const r = rampOf([70, 72, 84]);
+      let l = 3 + (noise2(gx * .6, gy * .6) - .5) * .5 + (ih(Math.floor(gx * 6), Math.floor(gy * 6)) > .93 ? 1 : 0);
+      if (Math.abs(gy - 1597 * K) < .38 && ((Math.floor(gx / 7.5)) & 1) === 0) return rampOf([240, 232, 170])[clamp(Math.floor(3 + bd * .5), 2, 4)];
+      return r[clamp(Math.floor(l + bd * .55), 0, 4)];
+    }
+    case M.ROOFF: {
+      const r = rampOf([204, 192, 174]);
+      const fx = gx / 1.7 - Math.floor(gx / 1.7) - .5, fy = gy / 1.7 - Math.floor(gy / 1.7) - .5;
+      const l = (fx * fx + fy * fy < .028) ? 1.6 : 3.1;
+      return r[clamp(Math.floor(l + bd * .5), 0, 4)];
+    }
+  }
+  return WHITE_PX;
+}
+function onLn(v, c, w) { return Math.abs(v - c) < w; }
+function courtLine(gx, gy) {
+  const w = .19, x0 = COURT.x0 + .6, x1 = COURT.x1 - .6, y0 = COURT.y0 + .6, y1 = COURT.y1 - .6;
+  const inX = gx >= x0 - w && gx <= x1 + w, inY = gy >= y0 - w && gy <= y1 + w;
+  if (inX && inY && (onLn(gx, x0, w) || onLn(gx, x1, w) || onLn(gy, y0, w) || onLn(gy, y1, w))) return true;
+  const mx = (COURT.x0 + COURT.x1) / 2, my = (COURT.y0 + COURT.y1) / 2;
+  if (inX && onLn(gy, my, w)) return true;
+  if (Math.abs(Math.hypot(gx - mx, gy - my) - 3.7) < w) return true;
+  const kw = 4.2, kl = 9;
+  if (Math.abs(gx - mx) <= kw + w) {
+    if ((onLn(gy, y0 + kl, w) || onLn(gy, y1 - kl, w)) && Math.abs(gx - mx) <= kw) return true;
+    if ((onLn(gx, mx - kw, w) || onLn(gx, mx + kw, w)) && (gy <= y0 + kl || gy >= y1 - kl) && inY) return true;
+  }
+  return false;
+}
+
+function groundPass() {
+  const invS = 1 / SS, tf = 1 / (SS * SIN);
+  const ex0 = LAND.x0, ex1 = LAND.x1, ey0 = LAND.y0, ey1 = LAND.y1;
+  for (let iy = 0; iy < H; iy++) {
+    const v = (iy + .5 - OY) * tf, d0 = v * COS;
+    rowD0[iy] = d0;
+    for (let ix = 0; ix < W; ix++) {
+      const i = iy * W + ix, u = (ix + .5 - OX) * invS;
+      const cx = (u + v) / R2, cy = (v - u) / R2;
+      const gx = px + cx * cs + cy * sn, gy = py - cx * sn + cy * cs;
+      gxMap[i] = gx; gyMap[i] = gy;
+      const ci = Math.floor((gx - LAND.x0) * INVC), cj = Math.floor((gy - LAND.y0) * INVC);
+      let m = 0;
+      if (ci >= 0 && cj >= 0 && ci < GW && cj < GH) m = grid[cj * GW + ci];
+      if (m === 0) { zb[i] = -1e9; groundZ[i] = -1e9; continue; }
+      const dist = Math.min(gx - ex0, ex1 - gx, gy - ey0, ey1 - gy);
+      if (dist < 5) {                      // ragged dithered edge dissolving into white
+        if (noise2(gx * .8, gy * .8) * .65 + bayerAt(ix, iy) * .35 >= dist / 5) { zb[i] = -1e9; groundZ[i] = -1e9; continue; }
+      }
+      pix[i] = groundColor(m, gx, gy, ix, iy);
+      zb[i] = groundZ[i] = d0;
+    }
+  }
+}
+
+/* ---- face shading for boxes / pillars ---- */
+function shadeBox(b, axis, sg, hx, hy, hz, ix, iy, nx, ny) {
+  let lvl;
+  if (axis === 2) lvl = 3.4;
+  else lvl = 1.15 + 1.4 * ((nx * LHx + ny * LHy) * .5 + .5);
+  const bd = bayerAt(ix, iy) - .5;
+  let ramp = b.ramp, l = lvl;
+  const a = axis === 1 ? hx : hy;                  // coordinate along a side face
+  const aLen = axis === 1 ? (b.x1 - b.x0) : (b.y1 - b.y0);
+  const a0 = axis === 1 ? b.x0 : b.y0;
+  const al = a - a0;
+  switch (b.tex) {
+    case 'wall': {
+      if (axis === 2) l = 3.45 + (noise2(hx * .6, hy * .6) - .5) * .25;
+      else { l += (noise2(al * .6, hz * .9) - .5) * .45; if (hz < .5) l -= .5; else if (hz > b.z1 - .35) l += .3; }
+      break;
+    }
+    case 'bld': {
+      if (axis === 2) {
+        const ex = Math.min(hx - b.x0, b.x1 - hx, hy - b.y0, b.y1 - hy);
+        l = ex < .7 ? 3.5 : 2.7 + (noise2(hx * .5, hy * .5) - .5) * .5;
+      } else if (axis < 2) {
+        const f = Math.floor(hz / STOREY), zz = hz - f * STOREY, pa = al - Math.floor(al / 4.2) * 4.2;
+        if (hz > b.z1 - .8) l += .35;
+        else if (hz < .55) l -= .7;
+        else {
+          const win = zz > 1.05 && zz < 2.55 && pa > .95 && pa < 3.3 && al > 1.2 && aLen - al > 1.2;
+          if (win) return GLASS[clamp(Math.floor(lvl * .9 + (zz > 2.2 ? .7 : 0) + bd * .5), 0, 4)];
+          if (zz < .22) l -= .45;
+        }
+        l += (noise2(al * .5, hz * .6) - .5) * .25;
+      }
+      break;
+    }
+    case 'chamber': {
+      if (axis === 2) { const ex = Math.min(hx - b.x0, b.x1 - hx, hy - b.y0, b.y1 - hy); l = ex < .45 ? 3.5 : 2.8; }
+      else { const rb = al * 1.5 - Math.floor(al * 1.5); l += rb < .5 ? .3 : -.25; if (hz < .5) l -= .5; }
+      break;
+    }
+    case 'pillar': {
+      if (axis === 2) l = 3.4;
+      else { l = 1.15 + 1.4 * ((nx * LHx + ny * LHy) * .5 + .5); if (hz < .4 || hz > b.z1 - .5) l += .35; }
+      break;
+    }
+    case 'net': {
+      const w = .17, per = 1.25;
+      let q1 = (al + hz) % per; if (q1 < 0) q1 += per;
+      let q2 = (al - hz) % per; if (q2 < 0) q2 += per;
+      if (axis === 2) break;
+      if (!(q1 < w || q2 < w || hz > b.z1 - .22 || hz < .12)) return 0;     // see-through gap
+      break;
+    }
+    case 'sign': {
+      if (axis === 1) {
+        const u = sg > 0 ? al : aLen - al, v = hz - b.z0, vh = b.z1 - b.z0, bw = .42;
+        if (u < bw || u > aLen - bw || v < bw || v > vh - bw) {
+          const st = Math.floor((u + v) * 1.5) & 1;
+          return (st ? YEL : BLK)[clamp(Math.floor(lvl + bd * .5), 1, 4)];
+        }
+        const cols = SIGN_TEXT.length * 4 - 1, pitch = (aLen - bw * 2 - .5) / cols;
+        const tu = (u - bw - .25) / pitch, tv = (vh - bw - (vh - bw * 2 - pitch * 5) / 2 - v) / pitch;
+        if (tu >= 0 && tu < cols && tv >= 0 && tv < 5) {
+          const ci = Math.floor(tu / 4), cc = Math.floor(tu) % 4;
+          if (cc < 3) {
+            const g = SIGN_FONT[SIGN_TEXT[ci]];
+            if (g && g[Math.floor(tv)][cc] === '1') return YEL[clamp(Math.floor(lvl + 1 + bd * .4), 2, 4)];
+          }
+        }
+        return BLK[clamp(Math.floor(lvl - .6 + bd * .4), 0, 3)];
+      }
+      break;
+    }
+    default: {
+      if (axis === 2) l = 3.4;
+    }
+  }
+  return ramp[clamp(Math.floor(l + bd * .55), 0, 4)];
+}
+
+const _c = [0, 0];
+function boxPass() {
+  const Dx = (cs + sn) || 1e-9, Dy = (-sn + cs) || 1e-9, Dz = DZ;
+  const iDx = 1 / Dx, iDy = 1 / Dy, iDz = 1 / Dz;
+  const sgx = Dx > 0 ? 1 : -1, sgy = Dy > 0 ? 1 : -1;
+  const R2cut = 24 * 24;
+  for (const b of BOXES) {
+    // screen bounding rect from the 8 corners
+    let mnx = 1e9, mxx = -1e9, mny = 1e9, mxy = -1e9;
+    for (let c = 0; c < 8; c++) {
+      proj(c & 1 ? b.x1 : b.x0, c & 2 ? b.y1 : b.y0, c & 4 ? b.z1 : b.z0);
+      if (_p.sx < mnx) mnx = _p.sx; if (_p.sx > mxx) mxx = _p.sx;
+      if (_p.sy < mny) mny = _p.sy; if (_p.sy > mxy) mxy = _p.sy;
+    }
+    const x0 = Math.max(0, Math.floor(mnx) - 1), x1 = Math.min(W - 1, Math.ceil(mxx) + 1);
+    const y0 = Math.max(0, Math.floor(mny) - 1), y1 = Math.min(H - 1, Math.ceil(mxy) + 1);
+    if (x0 > x1 || y0 > y1) continue;
+    b._vis = true;
+    const cyl = b.type === 'cyl';
+    const bx0 = b.x0, bx1 = b.x1, by0 = b.y0, by1 = b.y1;
+    const tz0 = b.z0 * iDz, tz1 = b.z1 * iDz;
+    for (let iy = y0; iy <= y1; iy++) {
+      const d0 = rowD0[iy];
+      for (let ix = x0; ix <= x1; ix++) {
+        const i = iy * W + ix, gx = gxMap[i], gy = gyMap[i];
+        let tmin, tmax, axis;
+        if (cyl) {
+          const ox = gx - b.cx, oy = gy - b.cy, A = Dx * Dx + Dy * Dy, B = 2 * (Dx * ox + Dy * oy), Cc = ox * ox + oy * oy - b.r * b.r;
+          const disc = B * B - 4 * A * Cc;
+          if (disc < 0) continue;
+          const sq = Math.sqrt(disc), t0 = (-B - sq) / (2 * A), t1 = (-B + sq) / (2 * A);
+          tmin = Math.max(t0, tz0); tmax = Math.min(t1, tz1);
+          axis = tmax === tz1 ? 2 : 3;
+        } else {
+          let tx0 = (bx0 - gx) * iDx, tx1 = (bx1 - gx) * iDx;
+          if (tx0 > tx1) { const t = tx0; tx0 = tx1; tx1 = t; }
+          let ty0 = (by0 - gy) * iDy, ty1 = (by1 - gy) * iDy;
+          if (ty0 > ty1) { const t = ty0; ty0 = ty1; ty1 = t; }
+          tmin = tz0; tmax = tz1; axis = 2;
+          if (tx0 > tmin) tmin = tx0;
+          if (tx1 < tmax) { tmax = tx1; axis = 0; }
+          if (ty0 > tmin) tmin = ty0;
+          if (ty1 < tmax) { tmax = ty1; axis = 1; }
+        }
+        if (tmax <= tmin) continue;
+        const d = d0 + KD * tmax;
+        if (d <= zb[i]) continue;
+        // let the walker show through whatever is in front of him
+        if (b.cut) {
+          const ddx = ix + .5 - pcx, ddy = iy + .5 - pcy, rr = ddx * ddx + ddy * ddy;
+          if (rr < R2cut && d > pDepth + .4 && bayerAt(ix, iy) < 1.55 * (1 - rr / R2cut)) continue;
+        }
+        const hx = gx + tmax * Dx, hy = gy + tmax * Dy, hz = tmax * Dz;
+        let nx = 0, ny = 0;
+        if (axis === 0) nx = sgx; else if (axis === 1) ny = sgy;
+        else if (axis === 3) { nx = (hx - b.cx) / b.r; ny = (hy - b.cy) / b.r; }
+        const col = shadeBox(b, axis, axis === 0 ? sgx : sgy, hx, hy, hz, ix, iy, nx, ny);
+        if (col === 0) continue;
+        pix[i] = col; zb[i] = d;
+      }
+    }
+  }
+}
+
+/* ---- spheres (engine.js style per-pixel lit discs) ---- */
+let SHADOW_PASS = false;
+function sphere(x, y, z, r, ramp, mode, ox, oy) {
+  proj(x, y, z);
+  const rp = Math.max(r * SS, .75), sx = _p.sx + (ox || 0), sy = _p.sy + (oy || 0), dc = _p.d;
+  if (sx + rp < 0 || sx - rp > W || sy + rp < 0 || sy - rp > H) return;
+  const y0 = Math.max(0, Math.floor(sy - rp)), y1 = Math.min(H - 1, Math.ceil(sy + rp));
+  const x0 = Math.max(0, Math.floor(sx - rp)), x1 = Math.min(W - 1, Math.ceil(sx + rp));
+  for (let iy = y0; iy <= y1; iy++) for (let ix = x0; ix <= x1; ix++) {
+    const dx = (ix + .5 - sx) / rp, dy = (iy + .5 - sy) / rp, nn = dx * dx + dy * dy;
+    if (nn > 1) continue;
+    const nz = Math.sqrt(1 - nn), d = dc + r * nz, i = iy * W + ix;
+    if (d <= zb[i]) continue;
+    let l = clamp(-.55 * dx - .6 * dy + .58 * nz, 0, 1);
+    if (mode === 'rough') l += (ih(ix, iy) - .5) * .55;
+    if (dy > .35) l = Math.max(l, .12 + dy * .24);          // warm bounce off the ground
+    zb[i] = d;
+    if (mode === 'solid') { pix[i] = ramp[clamp(Math.floor(l * 4.4 + .2), 1, 4)]; continue; }
+    pix[i] = ramp[clamp(Math.floor(l * 4.4 + .2 + (bayerAt(ix, iy) - .5) * .7), 0, 4)];
+  }
+}
+function sphPass(t) {
+  for (const s of SPH) {
+    let ox = 0, oy = 0;
+    if (s.leaf && !STILL) {
+      const reach = clamp((s.z - 2.5) / 3, .3, 1);
+      const sw = (Math.sin(t * .9 + s.x * .5 + s.z * .7) + .55 * Math.sin(t * 2.3 + s.k * 1.7)) * reach;
+      ox = Math.round(sw * .9); oy = Math.round(Math.sin(t * 1.3 + s.y + s.k) * reach * .45);
+    }
+    sphere(s.x, s.y, s.z, s.r, s.ramp, s.mode, ox, oy);
+  }
+}
+
+/* ---- shadows ---- */
+function stampEllipse(x, y, z, r, strength, dither) {
+  proj(x + SXo * z, y + SYo * z, 0);
+  const sx = _p.sx, sy = _p.sy, rx = r * SS * 1.05, ry = rx * SIN + 1;
+  if (sx + rx < 0 || sx - rx > W || sy + ry < 0 || sy - ry > H) return;
+  const y0 = Math.max(0, Math.floor(sy - ry)), y1 = Math.min(H - 1, Math.ceil(sy + ry));
+  const x0 = Math.max(0, Math.floor(sx - rx)), x1 = Math.min(W - 1, Math.ceil(sx + rx));
+  for (let iy = y0; iy <= y1; iy++) for (let ix = x0; ix <= x1; ix++) {
+    const dx = (ix + .5 - sx) / rx, dy = (iy + .5 - sy) / ry;
+    if (dx * dx + dy * dy + (bayerAt(ix, iy) - .5) * dither > 1) continue;
+    const i = iy * W + ix;
+    if (shadowMask[i] < strength) shadowMask[i] = strength;
+  }
+}
+function hull(pts) {
+  pts.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cr = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lo = [], up = [];
+  for (const p of pts) { while (lo.length >= 2 && cr(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); }
+  for (let i = pts.length - 1; i >= 0; i--) { const p = pts[i]; while (up.length >= 2 && cr(up[up.length - 2], up[up.length - 1], p) <= 0) up.pop(); up.push(p); }
+  lo.pop(); up.pop();
+  return lo.concat(up);
+}
+function fillPoly(poly, strength, dither) {
+  let mnY = 1e9, mxY = -1e9;
+  for (const p of poly) { if (p[1] < mnY) mnY = p[1]; if (p[1] > mxY) mxY = p[1]; }
+  const y0 = Math.max(0, Math.floor(mnY)), y1 = Math.min(H - 1, Math.ceil(mxY)), n = poly.length;
+  for (let iy = y0; iy <= y1; iy++) {
+    const yc = iy + .5;
+    let xl = 1e9, xr = -1e9;
+    for (let j = 0; j < n; j++) {
+      const a = poly[j], b = poly[(j + 1) % n];
+      if ((a[1] <= yc && b[1] > yc) || (b[1] <= yc && a[1] > yc)) {
+        const x = a[0] + (yc - a[1]) / (b[1] - a[1]) * (b[0] - a[0]);
+        if (x < xl) xl = x; if (x > xr) xr = x;
+      }
+    }
+    if (xl >= xr) continue;
+    const x0 = Math.max(0, Math.ceil(xl - .5)), x1 = Math.min(W - 1, Math.floor(xr - .5));
+    for (let ix = x0; ix <= x1; ix++) {
+      if (dither && bayerAt(ix, iy) > dither) continue;
+      const i = iy * W + ix;
+      if (shadowMask[i] < strength) shadowMask[i] = strength;
+    }
+  }
+}
+function shadowBox(b) {
+  if (!b._vis) return;
+  const pts = [];
+  if (b.type === 'cyl') {
+    for (let z = 0; z <= b.z1; z += .6) stampEllipse(b.cx, b.cy, z, b.r * 1.0, 1, 0);
+    return;
+  }
+  for (const z of [b.z0, b.z1]) for (let c = 0; c < 4; c++) {
+    proj((c & 1 ? b.x1 : b.x0) + SXo * z, (c & 2 ? b.y1 : b.y0) + SYo * z, 0);
+    pts.push([_p.sx, _p.sy]);
+  }
+  fillPoly(hull(pts), 1, b.kind === 'fence' ? .5 : 0);
+}
+function shadowsPass() {
+  for (const b of BOXES) {
+    if (b.kind === 'chair' || b.kind === 'fencepost' || b.kind === 'hoop') continue;
+    shadowBox(b);
+  }
+  for (const e of SHADOW_ELL) stampEllipse(e.x, e.y, e.z, e.r, 1, .4);
+  SHADOW_PASS = true; drawPlayer(); SHADOW_PASS = false;
+}
+function applyShadows() {
+  for (let i = 0; i < pix.length; i++) {
+    const s = shadowMask[i];
+    if (!s || !(zb[i] === groundZ[i])) continue;
+    if (s === 1) tint(i, .54, .52, .72); else tint(i, .36, .34, .56);
+  }
+}
+
+/* ---- ambient occlusion on the ground + depth edges ---- */
+const AO_OFFS = [];
+for (let k = 0; k < 8; k++) AO_OFFS.push([Math.round(Math.cos(k * Math.PI / 4) * 3), Math.round(Math.sin(k * Math.PI / 4) * 2.1)]);
+function occlusion() {
+  for (let iy = 4; iy < H - 4; iy++) for (let ix = 4; ix < W - 4; ix++) {
+    const i = iy * W + ix;
+    if (zb[i] !== groundZ[i] || groundZ[i] < -1e8) continue;
+    let hits = 0;
+    for (let k = 0; k < 8; k++) { const j = (iy + AO_OFFS[k][1]) * W + ix + AO_OFFS[k][0]; if (zb[j] !== groundZ[j]) hits++; }
+    if (!hits) continue;
+    if (hits >= 6) tint(i, .56, .54, .72);
+    else if (hits / 8 > bayerAt(ix, iy)) tint(i, .76, .74, .86);
+  }
+}
+function shadeEdges() {
+  const GY = GRADIENT_UNIT / SS;
+  for (let iy = 1; iy < H - 1; iy++) for (let ix = 1; ix < W - 1; ix++) {
+    const i = iy * W + ix, d = zb[i];
+    if (d < -1e8 || d === groundZ[i]) continue;
+    const a = i - W, b = i + W, c = i - 1, e = i + 1;
+    if (zb[a] === groundZ[a] || zb[b] === groundZ[b] || zb[c] === groundZ[c] || zb[e] === groundZ[e]) {
+      tint(i, .68, .66, .76);                         // silhouette against the ground
+    } else if (d - zb[a] - GY > EDGE || d - zb[c] > EDGE) {
+      const p = pix[i];                                // warm rim where something stands in front
+      pix[i] = rgb(lerp(p & 255, WARM[0], .3), lerp(p >> 8 & 255, WARM[1], .3), lerp(p >> 16 & 255, WARM[2], .22));
+    } else if (zb[e] - d > EDGE || zb[b] - GY - d > EDGE) {
+      tint(i, .74, .72, .82);
+    }
+  }
+}
+function tufts(t) {
+  const step = STILL ? 0 : Math.floor(t * 8) / 8;
+  for (const tf of TUFTS) {
+    proj(tf.x, tf.y, 0);
+    const sx = Math.round(_p.sx), sy = Math.round(_p.sy);
+    if (sx < 1 || sx >= W - 1 || sy < 4 || sy >= H) continue;
+    const gust = Math.sin(step * .8 + tf.ph) + .5 * Math.sin(step * 2.1 + tf.ph * 2.3);
+    const base = sy * W + sx;
+    const dark = shadowMask[base] ? GRASS_DARK : GRASS;
+    for (let k = 1; k <= tf.h; k++) {
+      const jx = sx + Math.round(gust * .95 * k / 3), jy = sy - k;
+      if (jx < 0 || jx >= W) continue;
+      const j = jy * W + jx;
+      if (zb[j] !== groundZ[j] || !(zb[base] === groundZ[base])) continue;
+      pix[j] = tf.bloom && k === tf.h ? tf.bloom : dark[clamp(tf.base + k + (gust > 1 ? 1 : 0), 1, 4)];
+    }
+  }
+}
+
+/* ---- the walker ---- */
+const SKIN = [228, 174, 134], HAIR = [54, 38, 32], SHIRT = [214, 72, 60], STRIPE = [244, 238, 226], LEGS = [46, 62, 110], SHOE = [226, 222, 212];
+function capsule(a, b, r0, r1, colorOf) {
+  const len = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+  const n = Math.max(1, Math.ceil(len / (Math.min(r0, r1) * .45)));
+  for (let k = 0; k <= n; k++) {
+    const t = k / n, z = lerp(a[2], b[2], t), x = lerp(a[0], b[0], t), y = lerp(a[1], b[1], t), r = lerp(r0, r1, t);
+    if (SHADOW_PASS) { if (k % 2 === 0) stampEllipse(x, y, z, r * .9, 1, 0); }
+    else sphere(x, y, z, r, rampOf(colorOf(z)), 'solid');
+  }
+}
+function drawPlayer() {
+  const fx = Math.cos(player.yaw), fy = Math.sin(player.yaw), sx = -fy, sy = fx;
+  const P3 = (a, b, c) => [player.x + fx * a + sx * b, player.y + fy * a + sy * b, c];
+  const mv = player.moving, ph = player.phase;
+  const sw = Math.sin(ph) * .62 * mv, l1 = Math.max(0, Math.cos(ph)) * mv, l2 = Math.max(0, -Math.cos(ph)) * mv;
+  const bob = Math.abs(Math.sin(ph)) * .06 * mv;
+  const hipZ = 1.28 + bob, lean = .08 + .1 * mv;
+  const shA = Math.sin(lean) * .95, shZ = hipZ + Math.cos(lean) * .95;
+  const neck = P3(shA, 0, shZ + .08), head = P3(shA + Math.sin(lean) * .32, 0, shZ + .36);
+  const footA = P3(sw, .2, .12 + .28 * l1), footB = P3(-sw, -.2, .12 + .28 * l2);
+  const kneeA = P3(sw * .5 + .14 * (1 + l1), .2, .7 + .1 * l1), kneeB = P3(-sw * .5 + .14 * (1 + l2), -.2, .7 + .1 * l2);
+  const hipA = P3(0, .15, hipZ), hipB = P3(0, -.15, hipZ);
+  const legs = () => LEGS, skin = () => SKIN, shirt = z => (Math.floor(z * 3.2) % 2 ? SHIRT : STRIPE), shoe = () => SHOE;
+  capsule(hipA, kneeA, .17, .13, legs); capsule(kneeA, footA, .13, .1, legs);
+  capsule(hipB, kneeB, .17, .13, legs); capsule(kneeB, footB, .13, .1, legs);
+  capsule(footA, P3(sw + .18, .2, .08 + .28 * l1), .1, .09, shoe);
+  capsule(footB, P3(-sw + .18, -.2, .08 + .28 * l2), .1, .09, shoe);
+  capsule(P3(0, 0, hipZ), neck, .3, .32, shirt);
+  capsule(neck, head, .11, .12, skin);
+  capsule(head, head, .24, .24, skin);
+  capsule(P3(shA - .06, 0, head[2] + .08), P3(shA - .06, 0, head[2] + .08), .205, .205, () => HAIR);
+  const shR = P3(shA, .36, shZ - .03), shL = P3(shA, -.36, shZ - .03);
+  const aR = -sw * 1.2 + .08, aL = sw * 1.2 + .08;
+  const elR = P3(shA + Math.sin(aR) * .46, .4, shZ - .03 - Math.cos(aR) * .46), haR = P3(shA + Math.sin(aR + .2) * .92, .42, shZ - .03 - Math.cos(aR + .2) * .92);
+  const elL = P3(shA + Math.sin(aL) * .46, -.4, shZ - .03 - Math.cos(aL) * .46), haL = P3(shA + Math.sin(aL + .2) * .92, -.42, shZ - .03 - Math.cos(aL + .2) * .92);
+  capsule(shR, elR, .12, .1, shirt); capsule(elR, haR, .09, .08, skin);
+  capsule(shL, elL, .12, .1, shirt); capsule(elL, haL, .09, .08, skin);
+  if (SHADOW_PASS) { stampEllipse(footA[0], footA[1], 0, .22, 2, 0); stampEllipse(footB[0], footB[1], 0, .22, 2, 0); }
+}
+
+const STILL = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+function render(t) {
+  cs = Math.cos(cam.yaw); sn = Math.sin(cam.yaw); px = player.x; py = player.y;
+  frameLight();
+  pix.fill(WHITE_PX);
+  groundPass();
+  proj(px, py, 1.4); pcx = _p.sx; pcy = _p.sy; pDepth = _p.d;
+  boxPass();
+  sphPass(t);
+  occlusion();
+  shadowsPass();
+  applyShadows();
+  tufts(t);
+  shadowMask.fill(0);
+  drawPlayer();
+  shadeEdges();
+  ctx.putImageData(image, 0, 0);
+}
+
+/* =====================================================================
+   INPUT + SIMULATION
+   ===================================================================== */
+const keys = Object.create(null);
+const stick = { x: 0, y: 0 };
+let rotHold = 0;
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  keys[k] = true;
+  if (k === 'f') toggleDebug();
+  if (k === 'l') toggleLight();
+  if (k === '0') cam.yaw = 0;
+  if (k === '=' || k === '+') zoom(1);
+  if (k === '-') zoom(-1);
+  if (k.startsWith('arrow') || k === ' ') e.preventDefault();
+});
+addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+function zoom(d) { SS = clamp(SS + d, 4, 16); }
+function toggleDebug() { debug = !debug; $('bD').classList.toggle('on', debug); if (!debug) $('hud').textContent = ''; }
+function toggleLight() { lightLocked = !lightLocked; $('bLt').classList.toggle('on', !lightLocked); }
+addEventListener('wheel', e => { zoom(e.deltaY < 0 ? 1 : -1); e.preventDefault(); }, { passive: false });
+
+// drag anywhere on the picture to spin the camera around the walker
+let drag = null;
+$('wrap').addEventListener('pointerdown', e => { drag = { id: e.pointerId, x: e.clientX, yaw: cam.yaw }; $('wrap').setPointerCapture(e.pointerId); });
+$('wrap').addEventListener('pointermove', e => { if (drag && e.pointerId === drag.id) cam.yaw = drag.yaw + (e.clientX - drag.x) * .008; });
+const endDrag = e => { if (drag && e.pointerId === drag.id) drag = null; };
+$('wrap').addEventListener('pointerup', endDrag); $('wrap').addEventListener('pointercancel', endDrag);
+
+// on-screen controls
+const holdBtn = (id, on, off) => {
+  const el = $(id);
+  el.addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); on(); });
+  for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) el.addEventListener(ev, off);
+};
+holdBtn('bL', () => rotHold = -1, () => rotHold = 0);
+holdBtn('bR', () => rotHold = 1, () => rotHold = 0);
+$('bD').addEventListener('click', toggleDebug);
+$('bLt').addEventListener('click', toggleLight);
+$('bZp').addEventListener('click', () => zoom(1));
+$('bZm').addEventListener('click', () => zoom(-1));
+(function joystick() {
+  const el = $('stick'), knob = $('knob'); let id = null;
+  const set = e => {
+    const r = el.getBoundingClientRect(), cx = r.left + r.width / 2, cy = r.top + r.height / 2, R = r.width / 2 - 10;
+    let dx = e.clientX - cx, dy = e.clientY - cy; const m = Math.hypot(dx, dy);
+    if (m > R) { dx *= R / m; dy *= R / m; }
+    knob.style.transform = `translate(${dx}px,${dy}px)`;
+    stick.x = dx / R; stick.y = -dy / R;
+    if (Math.hypot(stick.x, stick.y) < .15) { stick.x = 0; stick.y = 0; }
+  };
+  el.addEventListener('pointerdown', e => { id = e.pointerId; el.setPointerCapture(id); set(e); e.preventDefault(); });
+  el.addEventListener('pointermove', e => { if (e.pointerId === id) set(e); });
+  const end = e => { if (e.pointerId === id) { id = null; stick.x = stick.y = 0; knob.style.transform = ''; } };
+  el.addEventListener('pointerup', end); el.addEventListener('pointercancel', end);
+})();
+
+function collide() {
+  const R = .6;
+  for (let pass = 0; pass < 2; pass++) for (const b of SOLIDS) {
+    const qx = clamp(player.x, b.x0, b.x1), qy = clamp(player.y, b.y0, b.y1);
+    const dx = player.x - qx, dy = player.y - qy, d2 = dx * dx + dy * dy;
+    if (d2 >= R * R) continue;
+    if (d2 > 1e-9) { const d = Math.sqrt(d2); player.x += dx / d * (R - d); player.y += dy / d * (R - d); }
+    else {
+      const l = player.x - b.x0, r = b.x1 - player.x, tp = player.y - b.y0, bt = b.y1 - player.y, m = Math.min(l, r, tp, bt);
+      if (m === l) player.x = b.x0 - R; else if (m === r) player.x = b.x1 + R; else if (m === tp) player.y = b.y0 - R; else player.y = b.y1 + R;
+    }
+  }
+  player.x = clamp(player.x, LAND.x0 + 3, LAND.x1 - 3); player.y = clamp(player.y, LAND.y0 + 3, LAND.y1 - 3);
+}
+function update(dt) {
+  let rd = (keys.q ? -1 : 0) + (keys.e ? 1 : 0) + rotHold;
+  cam.yaw += rd * 1.9 * dt;
+  let mx = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0) + stick.x;
+  let my = (keys.w || keys.arrowup ? 1 : 0) - (keys.s || keys.arrowdown ? 1 : 0) + stick.y;
+  const mag = Math.hypot(mx, my);
+  if (mag > 1) { mx /= mag; my /= mag; }
+  const run = keys.shift ? 1.7 : 1, spd = 6.2 * run * Math.min(1, mag);
+  if (mag > .05) {
+    const cvx = (mx - my) * .7071, cvy = (-mx - my) * .7071, c = Math.cos(cam.yaw), s = Math.sin(cam.yaw);
+    const wx = cvx * c + cvy * s, wy = -cvx * s + cvy * c, wl = Math.hypot(wx, wy) || 1;
+    player.x += wx / wl * spd * dt; player.y += wy / wl * spd * dt;
+    let da = Math.atan2(wy, wx) - player.yaw;
+    da = Math.atan2(Math.sin(da), Math.cos(da));
+    player.yaw += da * Math.min(1, dt * 14);
+    player.phase += spd * dt * 1.15;
+    player.moving = Math.min(1, player.moving + dt * 8);
+  } else player.moving = Math.max(0, player.moving - dt * 8);
+  collide();
+}
+
+/* =====================================================================
+   DEBUG OVERLAY: 3D dimensions, grid, axes, labels (crisp, on its own canvas)
+   ===================================================================== */
+const fmt = n => n.toFixed(1);
+const BOX_COL = { building: '#d6249f', chamber: '#e8731a', wall: '#0b8aa6', fence: '#2a5bd7', roof: '#2e9e4f', pillar: '#2e9e4f', gate: '#0b8aa6',
+  entrance: '#0b8aa6', chair: '#a33', hoop: '#777', sign: '#c9a100' };
+const EDGES = [[0, 1], [2, 3], [4, 5], [6, 7], [0, 2], [1, 3], [4, 6], [5, 7], [0, 4], [1, 5], [2, 6], [3, 7]];
+function drawDebug(fps) {
+  const g = dctx, k = dbgK, dpr = window.devicePixelRatio || 1;
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.clearRect(0, 0, dbg.width, dbg.height);
+  const T = (x, y, z) => { proj(x, y, z); return [_p.sx * k, _p.sy * k]; };
+  g.font = `${Math.round(10 * dpr)}px ui-monospace,Menlo,Consolas,monospace`;
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  const label = (txt, x, y, col) => {
+    g.lineWidth = 3 * dpr; g.strokeStyle = 'rgba(255,255,255,.92)'; g.strokeText(txt, x, y);
+    g.fillStyle = col; g.fillText(txt, x, y);
+  };
+  // the sign always carries its words
+  { const a = T((SIGN.x0 + SIGN.x1) / 2 * K, SIGN.y * K, SIGN.z1 + 1.1);
+    if (a[0] > 0 && a[0] < dbg.width && a[1] > 0 && a[1] < dbg.height) label('UNDER CONSTRUCTION', a[0], a[1], '#8a6a00'); }
+  if (!debug) return;
+  g.lineWidth = Math.max(1, dpr);
+  // 10u world grid
+  g.strokeStyle = 'rgba(90,90,150,.28)';
+  const gx0 = Math.floor((player.x - 40) / 10) * 10, gy0 = Math.floor((player.y - 40) / 10) * 10;
+  g.beginPath();
+  for (let x = gx0; x <= player.x + 40; x += 10) { const a = T(x, player.y - 40, 0), b = T(x, player.y + 40, 0); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); }
+  for (let y = gy0; y <= player.y + 40; y += 10) { const a = T(player.x - 40, y, 0), b = T(player.x + 40, y, 0); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); }
+  g.stroke();
+  for (let x = gx0; x <= player.x + 40; x += 20) for (let y = gy0; y <= player.y + 40; y += 20) {
+    const a = T(x, y, 0); if (a[0] > 0 && a[0] < dbg.width && a[1] > 0 && a[1] < dbg.height) label(x + ',' + y, a[0], a[1], 'rgba(70,70,140,.8)');
+  }
+  // zones
+  g.setLineDash([4 * dpr, 4 * dpr]);
+  for (const z of ZONES) {
+    const cx = (z.x0 + z.x1) / 2 * K, cy = (z.y0 + z.y1) / 2 * K;
+    if (Math.hypot(cx - player.x, cy - player.y) > 70) continue;
+    g.strokeStyle = z.col; g.beginPath();
+    [[z.x0, z.y0], [z.x1, z.y0], [z.x1, z.y1], [z.x0, z.y1]].forEach(([x, y], i) => { const a = T(x * K, y * K, .05); i ? g.lineTo(a[0], a[1]) : g.moveTo(a[0], a[1]); });
+    g.closePath(); g.stroke();
+    const a = T(clamp(player.x, z.x0 * K + 2, z.x1 * K - 2) * 0 + cx, cy, .05);
+    label(z.name + '  ' + fmt((z.x1 - z.x0) * K) + ' x ' + fmt((z.y1 - z.y0) * K) + 'u', a[0], a[1], z.col);
+  }
+  g.setLineDash([]);
+  for (const m of MARKS) {
+    if (Math.hypot(m.x * K - player.x, m.y * K - player.y) > 60) continue;
+    const a = T(m.x * K, m.y * K, m.z); label(m.name, a[0], a[1], '#111');
+  }
+  // boxes: wireframe + dimensions
+  const nearest = {};
+  for (const b of BOXES) {
+    if (b.kind !== 'wall' && b.kind !== 'fence') continue;
+    const d = Math.hypot((b.x0 + b.x1) / 2 - player.x, (b.y0 + b.y1) / 2 - player.y);
+    if (!nearest[b.kind] || d < nearest[b.kind].d) nearest[b.kind] = { b, d };
+  }
+  for (const b of BOXES) {
+    if (!b._vis || b.kind === 'fencepost') continue;
+    const cxw = (b.x0 + b.x1) / 2, cyw = (b.y0 + b.y1) / 2;
+    if (Math.hypot(cxw - player.x, cyw - player.y) > 75 && (b.x1 - b.x0 < 40 && b.y1 - b.y0 < 40)) continue;
+    const col = BOX_COL[b.kind] || '#333';
+    g.strokeStyle = col; g.lineWidth = Math.max(1, dpr);
+    const c8 = [];
+    for (let c = 0; c < 8; c++) c8.push(T(c & 1 ? b.x1 : b.x0, c & 2 ? b.y1 : b.y0, c & 4 ? b.z1 : b.z0));
+    g.beginPath();
+    for (const [a, bb] of EDGES) { g.moveTo(c8[a][0], c8[a][1]); g.lineTo(c8[bb][0], c8[bb][1]); }
+    g.stroke();
+    const w = b.x1 - b.x0, d = b.y1 - b.y0, h = b.z1 - b.z0;
+    const big = b.kind === 'building' || b.kind === 'chamber' || b.kind === 'roof' || b.kind === 'pillar' || b.kind === 'sign' || b.kind === 'gate' || b.kind === 'entrance';
+    if (big || (nearest[b.kind] && nearest[b.kind].b === b)) {
+      const top = T(cxw, cyw, b.z1);
+      let txt = b.name + '  ' + fmt(w) + ' x ' + fmt(d) + ' x ' + fmt(h) + 'u';
+      if (b.kind === 'building') txt += '  (4 storeys x ' + STOREY + ')';
+      if (b.kind === 'wall') txt = 'WALL  h' + fmt(WALL_H) + ' thick ' + fmt(WALL_T) + 'u';
+      if (b.kind === 'fence') txt = 'NET FENCE  h' + fmt(WALL_H) + 'u (= wall height)';
+      if (b.kind === 'roof') txt += '  slab z ' + fmt(b.z0) + '-' + fmt(b.z1);
+      if (b.kind === 'chamber') txt += '  (height assumed)';
+      label(txt, top[0], top[1] - 6 * dpr, col);
+      if (b.kind === 'building' || b.kind === 'chamber' || b.kind === 'pillar') {      // vertical height dimension
+        const a = T(b.x1, b.y1, b.z0), c = T(b.x1, b.y1, b.z1);
+        g.strokeStyle = col; g.beginPath(); g.moveTo(a[0] + 6 * dpr, a[1]); g.lineTo(c[0] + 6 * dpr, c[1]);
+        g.moveTo(a[0] + 2 * dpr, a[1]); g.lineTo(a[0] + 10 * dpr, a[1]); g.moveTo(c[0] + 2 * dpr, c[1]); g.lineTo(c[0] + 10 * dpr, c[1]); g.stroke();
+        label('h ' + fmt(h) + 'u', a[0] + 8 * dpr, (a[1] + c[1]) / 2, col);
+      }
+    }
+  }
+  // the walker: height gauge and axes
+  { const a = T(player.x, player.y, 0), c = T(player.x, player.y, HUMAN_H), o = 22 * dpr;
+    g.strokeStyle = '#d6249f'; g.beginPath(); g.moveTo(a[0] + o, a[1]); g.lineTo(c[0] + o, c[1]);
+    g.moveTo(a[0] + o - 4 * dpr, a[1]); g.lineTo(a[0] + o + 4 * dpr, a[1]); g.moveTo(c[0] + o - 4 * dpr, c[1]); g.lineTo(c[0] + o + 4 * dpr, c[1]); g.stroke();
+    label('HUMAN ' + fmt(HUMAN_H) + 'u', a[0] + o + 28 * dpr, (a[1] + c[1]) / 2, '#d6249f');
+    const ax = [[5, 0, 0, '#d33', 'x'], [0, 5, 0, '#2a2', 'y'], [0, 0, 5, '#33d', 'z']];
+    for (const [dx, dy, dz, col, n] of ax) {
+      const e = T(player.x + dx, player.y + dy, dz); g.strokeStyle = col; g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(e[0], e[1]); g.stroke(); label(n, e[0], e[1], col);
+    }
+  }
+  const m = matAt(player.x, player.y);
+  $('hud').textContent =
+    'x ' + fmt(player.x) + '  y ' + fmt(player.y) + '  yaw ' + Math.round(((cam.yaw * 180 / Math.PI) % 360 + 360) % 360) + 'deg  zoom ' + SS + '  fps ' + fps + '\n' +
+    'ground: ' + MAT_NAME[m] + '\n' +
+    'light: ' + (lightLocked ? 'locked to camera' : 'fixed sun') + '\n' +
+    '1u = ' + M_PER_U.toFixed(2) + 'm  human ' + HUMAN_H + 'u  storey ' + STOREY + 'u\n' +
+    'wall/fence h' + WALL_H + 'u  path w' + PATH_W + 'u  roof z' + ROOF_Z0 + '-' + ROOF_Z1 + 'u';
+}
+
+/* =====================================================================
+   BOOT
+   ===================================================================== */
+function alloc(w, h) {
+  W = w; H = h;
+  canvas.width = W; canvas.height = H;
+  image = ctx.createImageData(W, H);
+  pix = new Uint32Array(image.data.buffer);
+  zb = new Float32Array(W * H); groundZ = new Float32Array(W * H); shadowMask = new Uint8Array(W * H);
+  gxMap = new Float32Array(W * H); gyMap = new Float32Array(W * H); rowD0 = new Float32Array(H);
+  OX = W / 2; OY = H / 2 + Math.round(H * .07);
+}
+function fit() {
+  const dpr = window.devicePixelRatio || 1;
+  const touch = document.body.classList.contains('touch');
+  const aw = innerWidth, ah = innerHeight - (touch ? 172 : 0);
+  $('stage').style.height = ah + 'px';
+  const a = aw / ah;
+  let w, h;
+  if (a >= 1) { h = 300; w = clamp(Math.round(h * a), 300, 560); } else { w = 340; h = clamp(Math.round(w / a), 300, 600); }
+  if (w !== W || h !== H || !pix) alloc(w, h);
+  cssScale = Math.max(1, Math.floor(Math.min(aw / W, ah / H) * dpr)) / dpr;
+  canvas.style.width = W * cssScale + 'px'; canvas.style.height = H * cssScale + 'px';
+  dbg.style.width = W * cssScale + 'px'; dbg.style.height = H * cssScale + 'px';
+  dbg.width = Math.round(W * cssScale * dpr); dbg.height = Math.round(H * cssScale * dpr);
+  dbgK = cssScale * dpr;
+}
+
+canvas = $('c'); ctx = canvas.getContext('2d');
+dbg = $('dbg'); dctx = dbg.getContext('2d');
+if (('ontouchstart' in window) || (typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches)) document.body.classList.add('touch');
+// start just outside the ENTER arrow, facing in
+player.x = 1598 * K; player.y = 1318 * K;
+fit();
+addEventListener('resize', fit);
+
+let last = 0, fpsN = 0, fpsT = 0, fpsShown = 0;
+function frame(ts) {
+  const dt = Math.min(.05, last ? (ts - last) / 1000 : .016);
+  last = ts;
+  update(dt);
+  render(ts / 1000);
+  fpsN++; fpsT += dt;
+  if (fpsT >= .5) { fpsShown = Math.round(fpsN / fpsT); fpsN = 0; fpsT = 0; }
+  drawDebug(fpsShown);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+window.PP = { render, update, drawDebug, player, cam, get W() { return W; }, get H() { return H; }, get pix() { return pix; }, BOXES, grid, matAt, setS: v => SS = v, setDebug: v => { debug = v; }, TUFTS, SPH };
+})();
+</script>
+</body>
+</html>
